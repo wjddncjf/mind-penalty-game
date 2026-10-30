@@ -1,4 +1,4 @@
-# MIND PENALTY v3.6.2
+# mind penalykick v3.6.2
 
 브라우저에서 실행하는 5번 슈팅·3골 승리 페널티킥 심리전 게임. 로그인·서버·설치 없이 실행할 수 있도록 HTML/CSS/JavaScript로 제작했습니다.
 
