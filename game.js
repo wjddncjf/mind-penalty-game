@@ -1,579 +1,133 @@
 'use strict';
-
 (() => {
-  const STORAGE_KEY = 'mind-penalty-v2';
-  const LEGACY_KEY = 'mind-penalty-v1';
-  const DIRECTIONS = ['왼쪽', '중앙', '오른쪽'];
-  const MAX_KICKS = 5;
-  const WIN_GOALS = 3;
-  const MAX_RECORDS = 100;
-  const el = (id) => document.getElementById(id);
-
-  // Names deliberately don't explain any goalkeeper's behavior.
-  const KEEPERS = [
-    { id: 'nocturne', number: '07', name: 'T.쿠르투아', color: '#c9eb75', quote: '“경기장에는 작은 흔적들이 남기 마련이지.”',
-      pre: '그는 잠시 공이 놓였던 자리를 쳐다봅니다.', rule: '직전 슈팅 방향을 다시 경계합니다.', first: 1 },
-    { id: 'aurora', number: '18', name: '알리송', color: '#94b5ff', quote: '“눈에 보이는 것이 전부일까?”',
-      pre: '그는 골대의 세 구역을 차례로 훑어봅니다.', rule: '직전 슈팅 방향의 한 칸 오른쪽으로 움직입니다.', first: 2 },
-    { id: 'veil', number: '26', name: 'M.노이어', color: '#f6b67c', quote: '“답은 네 선택 안에 있을 수도 있지.”',
-      pre: '그는 전광판의 지난 기록을 한 번 확인합니다.', rule: '지금까지 가장 자주 찬 방향을 경계합니다.', first: 0 }
+  const $ = id => document.getElementById(id);
+  const KEY = 'mind-penalty-v3.6';
+  const OLD_KEY = 'mind-penalty-v2';
+  const MAX_KICKS = 5, MAX_RECORDS = 100, CYCLE_MS = 1400;
+  const DIR = ['왼쪽','중앙','오른쪽'];
+  const keepers = [
+    {id:'nocturne',name:'T.쿠르투아',number:'07',color:'#c7f35b',first:1,quote:'경기장에는 작은 흔적들이 남기 마련이지.',clues:['그는 이전에 놓인 공의 자리를 유심히 봅니다.','그의 판단에는 과거 슈팅의 선택이 영향을 미칩니다.','가장 최근의 슈팅을 다시 떠올려 보세요.'],rule:'직전 슈팅 방향을 다시 방어합니다.'},
+    {id:'aurora',name:'알리송',number:'18',color:'#94b5ff',first:2,quote:'눈에 보이는 것이 전부일까?',clues:['골대의 세 구역을 번갈아 확인합니다.','이전 슈팅이 그의 다음 움직임에 힌트를 줍니다.','그는 직전 선택에서 한 칸 옆의 구역도 주의합니다.'],rule:'직전 슈팅 방향에서 오른쪽으로 한 칸 이동한 구역을 막습니다. 왼쪽→중앙→오른쪽→왼쪽 순환입니다.'},
+    {id:'veil',name:'M.노이어',number:'26',color:'#f6b67c',first:0,quote:'답은 네 선택 안에 있을 수도 있지.',clues:['그는 여러 번의 슈팅을 기억하려 합니다.','한 번의 슈팅보다 쌓인 선택에 주목합니다.','지금까지 유독 많이 고른 방향이 있나요?'],rule:'지금까지 가장 많이 선택한 방향을 방어합니다. 최다 동률에 직전 방향이 포함되면 직전 방향을 우선합니다.'}
   ];
-  const KEEPER_BY_ID = Object.fromEntries(KEEPERS.map(k => [k.id, k]));
-
-  const defaultStore = () => ({
-    version: 2,
-    stats: { gamesPlayed: 0, wins: 0, bestScore: 0 },
-    settings: { reduceMotion: false, hintRound: 3 },
-    records: []
-  });
-  const boundedInteger = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
-  const safeRecord = (record) => record && typeof record === 'object' &&
-    boundedInteger(record.number, 1, 1000000) &&
-    boundedInteger(record.hintRound, 2, 4) &&
-    boundedInteger(record.goals, 0, 5) &&
-    boundedInteger(record.saves, 0, 5) && record.goals + record.saves === MAX_KICKS &&
-    boundedInteger(record.seconds, 0, 1000000) && typeof record.won === 'boolean' &&
-    record.won === (record.goals >= WIN_GOALS) &&
-    typeof record.date === 'string' && record.date.length <= 40 &&
-    typeof record.cause === 'string' && record.cause.length <= 400 &&
-    (record.keeperOrder === undefined || (typeof record.keeperOrder === 'string' && record.keeperOrder.length <= 100));
-
-  function validStore(value, version) {
-    return value && value.version === version && value.stats && value.settings && Array.isArray(value.records) &&
-      boundedInteger(value.stats.gamesPlayed, 0, 1000000) &&
-      boundedInteger(value.stats.wins, 0, value.stats.gamesPlayed) &&
-      boundedInteger(value.stats.bestScore, 0, 5) &&
-      typeof value.settings.reduceMotion === 'boolean' &&
-      boundedInteger(value.settings.hintRound, 2, 4) &&
-      value.records.length <= MAX_RECORDS && value.records.every(safeRecord);
+  const keeperById = Object.fromEntries(keepers.map(k=>[k.id,k]));
+  const defaultSettings = () => ({sound:true,master:65,crowd:45,effects:75,reduceMotion:false,hintRound:3});
+  const freshStore = () => ({version:36,settings:defaultSettings(),stats:{gamesPlayed:0,wins:0,bestScore:0},records:[],activeMatch:null});
+  const freshGame = () => ({phase:'ready',round:1,aim:1,aimMoves:0,goals:0,shots:[],keeperOrder:[],paused:false,elapsedMs:0,timingElapsed:0,timingPosition:0,hintRound:3,lastShot:null,visualElapsed:0});
+  const esc = str => String(str).replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+  const bounded = (v,min,max) => Number.isInteger(v) && v>=min && v<=max;
+  const shortTime = ms => `${String(Math.floor(ms/60000)).padStart(2,'0')}:${String(Math.floor(ms/1000)%60).padStart(2,'0')}`;
+  const resultKind = s => s.goal?'goal':s.missed?'out':'save';
+  function sanitizeSettings(s) {const v = {...defaultSettings(),...(s && typeof s==='object'?s:{})};v.hintRound=bounded(v.hintRound,2,4)?v.hintRound:3;v.reduceMotion=Boolean(v.reduceMotion);v.sound=v.sound!==false;for(const k of ['master','crowd','effects'])v[k]=bounded(v[k],0,100)?v[k]:defaultSettings()[k];return v;}
+  function safeShot(s){return s&&bounded(s.number,1,MAX_KICKS)&&bounded(s.aim,0,2)&&bounded(s.keeper,0,2)&&typeof s.goal==='boolean'&&typeof s.missed==='boolean'&&['GOOD','PERFECT','MISS'].includes(s.timing)&&keeperById[s.keeperId];}
+  function safeMatch(m){return m&&typeof m==='object'&&['aim','timing','result'].includes(m.phase)&&bounded(m.round,1,5)&&bounded(m.aim,0,2)&&bounded(m.goals,0,5)&&Array.isArray(m.shots)&&m.shots.length<=5&&m.shots.every(safeShot)&&m.shots.filter(s=>s.goal).length===m.goals&&Array.isArray(m.keeperOrder)&&m.keeperOrder.length===5&&m.keeperOrder.every(id=>keeperById[id])&&(m.shots.length<5||(m.shots.length===5&&m.round===5&&m.phase==='result'))&&bounded(m.hintRound,2,4)&&Number.isFinite(m.elapsedMs)&&m.elapsedMs>=0&&m.elapsedMs<1e9;}
+  function load(){const v=freshStore();try {let raw=localStorage.getItem(KEY);if(raw){const old=JSON.parse(raw);if(old&&old.version===36){v.settings=sanitizeSettings(old.settings);if(old.stats&&bounded(old.stats.gamesPlayed,0,1000000)&&bounded(old.stats.wins,0,old.stats.gamesPlayed)&&bounded(old.stats.bestScore,0,5))v.stats=old.stats;if(Array.isArray(old.records))v.records=old.records.slice(-MAX_RECORDS).filter(r=>r&&typeof r==='object');if(safeMatch(old.activeMatch))v.activeMatch=old.activeMatch;return v;}}raw=localStorage.getItem(OLD_KEY);if(raw){const old=JSON.parse(raw);if(old&&old.version===2){v.settings=sanitizeSettings({...old.settings,sound:old.settings?.soundEnabled!==false});if(old.stats&&bounded(old.stats.gamesPlayed,0,1000000)&&bounded(old.stats.wins,0,old.stats.gamesPlayed)&&bounded(old.stats.bestScore,0,5))v.stats=old.stats;if(Array.isArray(old.records))v.records=old.records.slice(-MAX_RECORDS).filter(r=>r&&typeof r==='object');return v;}}}catch(err){console.warn('Saved data could not be read',err)}return v;}
+  let store=load();let game=freshGame();let screen='home';let modal=null;let lastFrame=performance.now();
+  let audioReady=false, audioCtx=null, reactionAudio=null;
+  // Everything is bundled locally: bright, cute flash-game sounds, not stadium recordings.
+  const soundFiles={ambience:'assets/arcade-chatter.wav',goal:'assets/arcade-goal.wav',save:'assets/arcade-save.wav',out:'assets/arcade-out.wav'};
+  const sounds=Object.fromEntries(Object.entries(soundFiles).map(([name,path])=>{
+    const a=new Audio(path);a.preload='auto';a.loop=name==='ambience';return [name,a];
+  }));
+  function ensureAudio(){
+    if(!audioReady){audioReady=true;for(const a of Object.values(sounds)){try{a.load();}catch(_e){}}}
+    try{const Ctx=window.AudioContext||window.webkitAudioContext;if(Ctx){audioCtx ||= new Ctx();if(audioCtx.state==='suspended')audioCtx.resume().catch(()=>{});}}catch(err){console.warn('Audio not available',err)}
+    syncAmbience();
   }
-
-  function loadStore() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw !== null) {
-        const parsed = JSON.parse(raw);
-        if (!validStore(parsed, 2)) throw new Error('Invalid v2 saved data');
-        return { data: parsed, message: '기존 기록을 정상적으로 불러왔습니다.' };
-      }
-      // Keep the user's old v1 results if they played the first edition.
-      const oldRaw = localStorage.getItem(LEGACY_KEY);
-      if (oldRaw !== null) {
-        const old = JSON.parse(oldRaw);
-        if (!validStore(old, 1)) throw new Error('Invalid legacy saved data');
-        return { data: { ...old, version: 2 }, message: '이전 버전의 경기 기록을 이어받았습니다.' };
-      }
-      return { data: defaultStore(), message: '저장된 기록이 없어 기본값으로 시작합니다.' };
-    } catch (_error) {
-      return { data: defaultStore(), message: '저장값이 손상되어 안전한 기본값으로 복구했습니다.' };
+  function getCrowdTarget(){
+    if(!audioReady||!store.settings.sound||screen!=='play'||game.paused||modal)return 0;
+    if(game.phase==='timing')return .10;
+    if(game.phase==='aim')return .25;
+    return .07;
+  }
+  function syncAmbience(){
+    const a=sounds.ambience;
+    const volume=getCrowdTarget()*store.settings.master/100*store.settings.crowd/100;
+    a.volume=Math.max(0,Math.min(1,volume));
+    if(volume<=0){a.pause();return;}
+    if(!a.paused)return;
+    try{const play=a.play();if(play?.catch)play.catch(()=>{});}catch(_e){}
+  }
+  function fxTone(freq,duration=.15,level=.08,shape='triangle',end=null,offset=0){
+    if(!audioCtx||!store.settings.sound)return;
+    const when=audioCtx.currentTime+offset;
+    const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.type=shape;o.frequency.setValueAtTime(freq,when);
+    if(end)o.frequency.exponentialRampToValueAtTime(end,when+duration);
+    const strength=Math.max(.0002,level*store.settings.master/100*store.settings.effects/100);
+    g.gain.setValueAtTime(.0001,when);g.gain.exponentialRampToValueAtTime(strength,when+.012);
+    g.gain.exponentialRampToValueAtTime(.0001,when+duration);
+    o.connect(g).connect(audioCtx.destination);o.start(when);o.stop(when+duration+.015);
+  }
+  function fx(kind){
+    if(!store.settings.sound)return;ensureAudio();
+    if(kind==='kick'){fxTone(175,.11,.12,'triangle',90);fxTone(460,.085,.035,'sine',260,.03);}
+    if(kind==='goal'){fxTone(880,.16,.065,'sine',1046);fxTone(1318,.21,.045,'triangle',1568,.12);}
+    if(kind==='save'){fxTone(240,.19,.095,'triangle',128);}
+    if(kind==='out'){fxTone(330,.29,.07,'sine',150);}
+    if(kind==='click'){fxTone(670,.07,.025,'sine',570);}
+  }
+  function sampleReaction(kind){
+    if(!store.settings.sound||!audioReady)return;
+    const a=sounds[kind];if(!a)return;
+    if(reactionAudio){reactionAudio.pause();reactionAudio.currentTime=0;}
+    reactionAudio=a;a.currentTime=0;
+    const s=store.settings;
+    const level=Math.min(.95,s.master/100*(.18+.95*s.crowd/100)*(kind==='goal'?1.2:1));
+    a.volume=s.crowd===0?0:level;
+    if(a.volume===0)return;
+    try{const play=a.play();if(play?.catch)play.catch(()=>{});}catch(_e){}
+  }
+  function stopAudio(){
+    for(const a of Object.values(sounds)){a.pause();}
+    if(reactionAudio){reactionAudio.pause();reactionAudio.currentTime=0;reactionAudio=null;}
+  }
+  function save(){store.activeMatch=game.phase==='ready'||game.phase==='finished'?null:JSON.parse(JSON.stringify({...game,phase:game.phase==='animating'?'result':game.phase,paused:true,visualElapsed:0}));try{localStorage.setItem(KEY,JSON.stringify(store));$('storage-note')?.removeAttribute('hidden');}catch(e){console.warn('Local storage unavailable',e)}}
+  function shuffle(a){const b=[...a];for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];}return b;}
+  function pickOrder(){const ids=shuffle(keepers.map(k=>k.id));while(ids.length<5){const options=keepers.map(k=>k.id).filter(id=>id!==ids.at(-1));ids.push(options[Math.floor(Math.random()*options.length)]);}return ids;}
+  function keeper(){return keeperById[game.keeperOrder[game.round-1]]||keepers[0]}
+  function directionFor(k){const prior=game.shots.at(-1);if(!prior)return k.first;if(k.id==='nocturne')return prior.aim;if(k.id==='aurora')return(prior.aim+1)%3;const counts=[0,0,0];game.shots.forEach(s=>counts[s.aim]++);const max=Math.max(...counts);return counts[prior.aim]===max?prior.aim:counts.indexOf(max);}
+  const timingAt=ms=>{const f=((ms%CYCLE_MS)+CYCLE_MS)%CYCLE_MS/CYCLE_MS;return f<=.5?2*f:2-2*f};
+  function stageReset(){const arena=$('arena');arena.dataset.action='idle';arena.dataset.flight='none';arena.dataset.reaction='none';arena.dataset.keeperReaction='none';arena.dataset.ballSettled='no';arena.dataset.flightOutcome='none';arena.classList.remove('settled-shot','kick-zoom','show-result','is-paused');$('result-flash').textContent='';$('ballFlight').style.transition='none';$('ballFlight').style.transform='translate(0px,0px) scale(1)';$('ballShadow').style.opacity='.5';}
+  function stageShowResult(shot){stageReset();const arena=$('arena');arena.dataset.action='flight';arena.dataset.flight=['left','center','right'][shot.keeper];arena.dataset.flightOutcome=shot.goal?'goal':'other';arena.classList.add('settled-shot');$('ballFlight').style.transform=`translate(${shot.missed?(shot.aim===0?-350:350):(shot.aim-1)*195}px,${shot.goal?-139:shot.missed?-237:-90}px) scale(.50)`;$('ballShadow').style.opacity='0';arena.dataset.reaction=resultKind(shot);arena.dataset.ballSettled='yes';arena.dataset.keeperReaction=resultKind(shot);arena.classList.add('show-result');$('result-flash').textContent=shot.goal?'GOAL!':shot.missed?'OUT!':'SAVE!';}
+  function showScreen(name){screen=name;for(const s of ['home','play','report'])$(s).hidden=s!==name;document.body.classList.toggle('in-match',name==='play');if(name!=='play')stopAudio();else if(audioReady)syncAmbience();if(name==='home')renderHome();}
+  function beginGame(){closeModal();$('pause-overlay').hidden=true;game=freshGame();game.phase='aim';game.keeperOrder=pickOrder();game.hintRound=store.settings.hintRound;screen='play';showScreen('play');stageReset();save();render();ensureAudio();fx('click');}
+  function resumeExisting(){if(!store.activeMatch)return beginGame();game={...freshGame(),...store.activeMatch,paused:true,visualElapsed:0};if(game.phase==='timing')game.timingPosition=timingAt(game.timingElapsed);if(game.phase==='result')game.lastShot=game.shots.at(-1);showScreen('play');render();$('pause-overlay').hidden=false;stopAudio();}
+  function returnHome(){if(screen==='play'&&game.phase!=='finished'){game.paused=true;game.phase=game.phase==='animating'?'result':game.phase;game.visualElapsed=0;save();}closeModal();$('pause-overlay').hidden=true;showScreen('home');}
+  function pause(){if(screen!=='play'||game.paused||game.phase==='finished')return;game.paused=true;$('pause-overlay').hidden=false;$('arena').classList.add('is-paused');save();stopAudio();}
+  function resume(){if(screen!=='play')return;game.paused=false;$('pause-overlay').hidden=true;$('arena').classList.remove('is-paused');lastFrame=performance.now();save();render();ensureAudio();}
+  function setAim(n){if(screen!=='play'||game.phase!=='aim'||game.paused)return;game.aim=n;game.aimMoves++;save();render();fx('click');}
+  function startTiming(){if(game.phase!=='aim'||game.paused)return;game.phase='timing';game.timingElapsed=0;game.timingPosition=0;save();render();fx('click');}
+  function shoot(){if(game.phase!=='timing'||game.paused)return;const pos=timingAt(game.timingElapsed);game.timingPosition=pos;const err=Math.abs(pos-.5);const timing=err<=.08?'PERFECT':err<=.23?'GOOD':'MISS';const k=keeper(),kd=directionFor(k),missed=timing==='MISS',goal=!missed&&kd!==game.aim;const shot={number:game.round,aim:game.aim,keeper:kd,keeperId:k.id,timing,goal,missed};game.shots.push(shot);game.lastShot=shot;if(goal)game.goals++;game.phase='animating';game.visualElapsed=0;save();render();$('arena').dataset.action='kick';$('arena').classList.add('kick-zoom');fx('kick');}
+  function animateShot(){const t=game.visualElapsed,arena=$('arena'),shot=game.lastShot;if(!shot)return;if(t>=330&&arena.dataset.action==='kick'){arena.dataset.action='flight';arena.dataset.flight=['left','center','right'][shot.keeper];arena.dataset.flightOutcome=shot.goal?'goal':'other';$('ballFlight').style.transition=store.settings.reduceMotion?'none':'transform .63s cubic-bezier(.3,.6,.3,1)';$('ballFlight').style.transform=`translate(${shot.missed?(shot.aim===0?-350:350):(shot.aim-1)*195}px,-237px) scale(.56)`;$('ballShadow').style.opacity='0';}if(t>=970&&arena.dataset.reaction==='none'){arena.dataset.reaction=resultKind(shot);arena.classList.remove('kick-zoom');arena.classList.add('show-result');$('result-flash').textContent=shot.goal?'GOAL!':shot.missed?'OUT!':'SAVE!';fx(resultKind(shot));sampleReaction(resultKind(shot));}if(t>=1380&&arena.dataset.ballSettled==='no'){
+      arena.dataset.ballSettled='yes';
+      $('ballFlight').style.transition=store.settings.reduceMotion?'none':'transform .4s ease-out';
+      $('ballFlight').style.transform=`translate(${shot.missed?(shot.aim===0?-350:350):(shot.aim-1)*195}px,${shot.goal?-139:shot.missed?-237:-90}px) scale(.50)`;
     }
-  }
-
-  const loaded = loadStore();
-  let store = loaded.data;
-  let activeHintRound = store.settings.hintRound;
-  let game = initialGame();
-
-  function initialGame() {
-    return {
-      phase: 'ready', paused: false, autoPaused: false,
-      round: 1, aim: 1, aimMoves: 0, goals: 0,
-      shots: [], lastShot: null, keeperOrder: [], finishOverlayPending: false,
-      timingPosition: 0, timingStartedAt: 0, timingElapsed: 0,
-      elapsedMs: 0, lastTick: performance.now()
-    };
-  }
-
-  // Every match uses a freshly shuffled opponent sequence. The first three
-  // kicks introduce all three keepers in unpredictable order; the remaining
-  // two are also drawn randomly. Nobody may appear twice in a row.
-  function shuffled(items) {
-    const result = [...items];
-    for (let i = result.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [result[i], result[j]] = [result[j], result[i]];
-    }
-    return result;
-  }
-  function drawKeeperOrder() {
-    const order = shuffled(KEEPERS.map(k => k.id));
-    while (order.length < MAX_KICKS) {
-      const options = KEEPERS.map(k => k.id).filter(id => id !== order[order.length - 1]);
-      order.push(options[Math.floor(Math.random() * options.length)]);
-    }
-    return order;
-  }
-  function currentKeeper() {
-    return KEEPER_BY_ID[game.keeperOrder[Math.min(game.round - 1, MAX_KICKS - 1)]] || null;
-  }
-  function persist() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-      return true;
-    } catch (_error) {
-      el('storage-status').textContent = '이 브라우저에서는 저장이 제한됩니다. 게임은 계속할 수 있지만 재접속 후 기록이 유지되지 않을 수 있습니다.';
-      return false;
-    }
-  }
-  function formatTime(seconds) {
-    const s = Math.max(0, Math.floor(seconds));
-    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  }
-  function updateClock() { el('game-clock').textContent = formatTime(game.elapsedMs / 1000); }
-  function tick() {
-    const now = performance.now();
-    const diff = Math.min(1000, Math.max(0, now - game.lastTick));
-    game.lastTick = now;
-    if (!game.paused && (game.phase === 'aim' || game.phase === 'timing' || game.phase === 'result')) {
-      game.elapsedMs += diff;
-      updateClock();
-    }
-  }
-
-  function beginGame() {
-    game = initialGame();
-    game.keeperOrder = drawKeeperOrder();
-    game.phase = 'aim';
-    activeHintRound = store.settings.hintRound;
-    game.lastTick = performance.now();
-    el('goal-effect').classList.remove('active');
-    render();
-  }
-  function changeAim(direction) {
-    if (game.phase !== 'aim' || game.paused) return;
-    game.aim = direction;
-    game.aimMoves++;
-    render();
-  }
-  function nudgeAim(delta) {
-    if (game.phase !== 'aim' || game.paused) return;
-    changeAim((game.aim + delta + 3) % 3);
-  }
-
-  function keeperDirection(keeper) {
-    const previous = game.shots.at(-1);
-    if (!previous) return keeper.first;
-    if (keeper.id === 'nocturne') return previous.aim;
-    if (keeper.id === 'aurora') return (previous.aim + 1) % 3;
-    // In a tie this keeper looks at the most recent of those directions.
-    const counts = [0, 0, 0];
-    game.shots.forEach(s => counts[s.aim]++);
-    const max = Math.max(...counts);
-    if (counts[previous.aim] === max) return previous.aim;
-    return counts.indexOf(max);
-  }
-  function playGoalEffect() {
-    const effect = el('goal-effect');
-    effect.classList.remove('active');
-    if (store.settings.reduceMotion) return;
-    void effect.offsetWidth;
-    effect.classList.add('active');
-  }
-  // 1400 ms for a full left-to-right-to-left cycle. A MISS always goes wide,
-  // but GOOD/PERFECT still face the original deterministic keeper logic.
-  const TIMING_CYCLE_MS = 1400;
-  function timingAt(elapsed) {
-    const fraction = (elapsed % TIMING_CYCLE_MS) / TIMING_CYCLE_MS;
-    return fraction <= 0.5 ? fraction * 2 : (1 - fraction) * 2;
-  }
-  function startTiming() {
-    if (game.phase !== 'aim' || game.paused) return;
-    game.phase = 'timing';
-    game.timingElapsed = 0;
-    game.timingStartedAt = performance.now();
-    game.timingPosition = 0;
-    render();
-    requestAnimationFrame(timingFrame);
-  }
-  function timingFrame(now) {
-    if (game.phase !== 'timing') return;
-    if (!game.paused) {
-      game.timingPosition = timingAt(game.timingElapsed + now - game.timingStartedAt);
-      el('timing-needle').style.left = `${game.timingPosition * 100}%`;
-    }
-    requestAnimationFrame(timingFrame);
-  }
-  function shoot() {
-    if (game.phase !== 'timing' || game.paused) return;
-    game.timingPosition = timingAt(game.timingElapsed + performance.now() - game.timingStartedAt);
-    const error = Math.abs(game.timingPosition - 0.5);
-    const timing = error <= 0.08 ? 'PERFECT' : error <= 0.23 ? 'GOOD' : 'MISS';
-    const opponent = currentKeeper();
-    const keeper = keeperDirection(opponent);
-    const missed = timing === 'MISS';
-    const goal = !missed && keeper !== game.aim;
-    const shot = { number: game.round, aim: game.aim, keeper, keeperId: opponent.id, goal, missed, timing };
-    game.shots.push(shot);
-    game.lastShot = shot;
-    if (goal) game.goals++;
-    game.phase = game.round === MAX_KICKS ? 'finished' : 'result';
-    if (game.phase === 'finished') {
-      game.finishOverlayPending = true;
-      finishGame();
-    }
-    render();
-    if (goal) playGoalEffect();
-    if (game.phase === 'finished') {
-      setTimeout(() => {
-        if (game.phase === 'finished' && game.lastShot === shot) {
-          game.finishOverlayPending = false;
-          renderField();
-        }
-      }, 900);
-    }
-  }
-  function finishGame() {
-    const won = game.goals >= WIN_GOALS;
-    store.stats.gamesPlayed++;
-    if (won) store.stats.wins++;
-    store.stats.bestScore = Math.max(store.stats.bestScore, game.goals);
-    store.records.push({
-      number: store.stats.gamesPlayed,
-      date: new Date().toISOString(), hintRound: activeHintRound,
-      keeperOrder: game.keeperOrder.map(id => KEEPER_BY_ID[id].name).join('·'),
-      goals: game.goals, saves: MAX_KICKS - game.goals,
-      seconds: Math.floor(game.elapsedMs / 1000),
-      cause: game.shots.filter(s => !s.goal).map(s => `${s.number}차 ${KEEPER_BY_ID[s.keeperId].name}: ${s.missed ? '타이밍 MISS (실축)' : DIRECTIONS[s.keeper] + ' 선방'}`).join(' / ') || '실패 없음',
-      won
-    });
-    if (store.records.length > MAX_RECORDS) store.records = store.records.slice(-MAX_RECORDS);
-    persist();
-  }
-  function nextKick() {
-    if (game.phase !== 'result' || game.paused) return;
-    game.round++;
-    game.phase = 'aim';
-    game.timingElapsed = 0;
-    game.timingPosition = 0;
-    game.lastShot = null;
-    el('goal-effect').classList.remove('active');
-    render();
-  }
-  function togglePause(auto = false) {
-    if (game.phase !== 'aim' && game.phase !== 'timing' && game.phase !== 'result') return;
-    if (auto && game.paused) return;
-    if (game.phase === 'timing') {
-      if (!game.paused) game.timingElapsed += performance.now() - game.timingStartedAt;
-      else if (!auto) game.timingStartedAt = performance.now();
-    }
-    game.paused = auto ? true : !game.paused;
-    game.autoPaused = auto && game.paused;
-    game.lastTick = performance.now();
-    render();
-  }
-
-  function clueProgress() {
-    if (game.phase === 'ready') return 0;
-    if (game.phase === 'finished' || game.round >= activeHintRound) return 3;
-    return Math.min(game.round - 1, 2);
-  }
-  function clueText() {
-    if (game.phase === 'ready') return '각 골키퍼에게는 이름만으로 알 수 없는 움직임 규칙이 있습니다.';
-    const opponent = currentKeeper();
-    if (game.phase === 'finished') return '경기 종료! T.쿠르투아는 직전 방향, 알리송은 한 칸 옆, M.노이어는 자주 선택한 방향을 경계합니다. 다음 경기에서 이 기록을 활용해 보세요.';
-    if (game.phase === 'result' && game.lastShot) {
-      return `${opponent.name}의 실제 다이빙은 ${DIRECTIONS[game.lastShot.keeper]}! 지금까지 기록과 비교해 보세요.`;
-    }
-    const prior = game.shots.filter(shot => shot.keeperId === opponent.id);
-    if (game.round >= activeHintRound) return `전술 기록 해독 · ${opponent.name}: ${opponent.rule}`;
-    if (prior.length) {
-      const last = prior.at(-1);
-      return `이전 대결: ${opponent.name}은 ${DIRECTIONS[last.keeper]}으로 몸을 날렸습니다. ${opponent.pre}`;
-    }
-    return `${opponent.name}의 첫 등장. ${opponent.pre}`;
-  }
-
-  function renderField() {
-    const overlay = el('pitch-overlay');
-    const eyebrow = el('overlay-eyebrow');
-    const title = el('overlay-title');
-    const copy = el('overlay-copy');
-    const keeper = el('keeper');
-    const ball = el('ball');
-    const opponent = currentKeeper();
-    const hasResult = game.lastShot !== null;
-    const finished = game.phase === 'finished';
-    const winning = game.goals >= WIN_GOALS;
-
-    keeper.className = hasResult ? `keeper dive-${game.lastShot.keeper}` : 'keeper';
-    keeper.style.setProperty('--keeper-shirt', opponent?.color || '#c9eb75');
-    ball.style.left = hasResult ? `${50 + (game.lastShot.aim - 1) * 26}%` : `${50 + (game.aim - 1) * 18}%`;
-    ball.classList.toggle('kicked', hasResult);
-    ball.classList.toggle('wide', hasResult && game.lastShot.missed);
-    el('pitch').classList.toggle('is-paused', game.paused);
-    el('pitch-keeper-name').textContent = opponent ? `${opponent.number} ${opponent.name}` : '???';
-    overlay.hidden = game.phase !== 'ready' && !game.paused && !(finished && !game.finishOverlayPending);
-
-    if (game.phase === 'ready') {
-      eyebrow.textContent = 'YOUR MATCH';
-      title.textContent = '상대가 누구인지, 아직 알 수 없습니다.';
-      copy.textContent = '시작 버튼을 누르면 세 골키퍼가 매 슈팅마다 무작위 순서로 등장합니다.';
-    } else if (game.paused) {
-      eyebrow.textContent = 'PAUSE';
-      title.textContent = game.autoPaused ? '다른 창으로 이동해 경기를 멈췄어요.' : '경기가 일시정지되었습니다.';
-      copy.textContent = '경기 시간이 멈췄습니다. 재개 버튼을 누르면 같은 상태에서 이어집니다.';
-    } else if (finished) {
-      eyebrow.textContent = winning ? 'MATCH WON' : 'MATCH LOST';
-      title.textContent = winning ? '승리! 골키퍼의 마음을 읽어냈어요.' : '패배! 다음엔 단서들을 연결해 보세요.';
-      copy.textContent = `최종 ${game.goals}골 · ${MAX_KICKS - game.goals}실패. 다시 시작하면 골키퍼 순서가 새로 섞이고 이번 판 점수는 초기화됩니다.`;
-    }
-  }
-  function renderHistory() {
-    const history = el('kick-history');
-    history.replaceChildren();
-    if (!game.shots.length) {
-      const placeholder = document.createElement('span');
-      placeholder.className = 'history-placeholder';
-      placeholder.textContent = '첫 번째 슈팅을 기다리는 중...';
-      history.append(placeholder);
-      return;
-    }
-    game.shots.forEach(shot => {
-      const chip = document.createElement('span');
-      chip.className = `kick-chip ${shot.goal ? 'goal' : 'save'}`;
-      chip.textContent = `${shot.number}차 ${KEEPER_BY_ID[shot.keeperId].name} · ${DIRECTIONS[shot.aim]} 슛 / ${DIRECTIONS[shot.keeper]} 다이빙 · ${shot.goal ? 'GOAL' : shot.missed ? 'WIDE' : 'SAVE'} · ${shot.timing || '기존 슛'}`;
-      history.append(chip);
-    });
-  }
-  function renderOpponent() {
-    const keeper = currentKeeper();
-    el('opponent-name').textContent = keeper?.name || '아직 미정';
-    el('opponent-number').textContent = keeper?.number || '--';
-    el('opponent-label').textContent = keeper ? `GOALKEEPER NO.${keeper.number}` : '이번 슈팅의 상대';
-    el('opponent-quote').textContent = keeper?.quote || '시작하면 골키퍼가 무작위로 정해집니다.';
-    el('opponent-avatar').style.setProperty('--keeper-shirt', keeper?.color || '#c9eb75');
-    const roster = el('roster-avatars');
-    roster.replaceChildren();
-    KEEPERS.forEach(candidate => {
-      const observed = game.shots.some(shot => shot.keeperId === candidate.id) || keeper?.id === candidate.id;
-      const badge = document.createElement('span');
-      badge.className = 'roster-avatar' + (keeper?.id === candidate.id ? ' current' : '') + (!observed ? ' unseen' : '');
-      badge.style.setProperty('--badge-color', candidate.color);
-      badge.textContent = observed ? candidate.name : '?';
-      badge.title = observed ? `${candidate.name} · ${candidate.number}` : '아직 등장하지 않음';
-      roster.append(badge);
-    });
-  }
-  function renderRecords() {
-    el('total-games').textContent = String(store.stats.gamesPlayed);
-    el('total-wins').textContent = String(store.stats.wins);
-    el('best-score').textContent = `${store.stats.bestScore} / 5`;
-    const body = el('records-body');
-    body.replaceChildren();
-    if (!store.records.length) {
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = 8;
-      td.className = 'empty-records';
-      td.textContent = '완료한 경기가 없습니다. 첫 판을 시작해 보세요!';
-      tr.append(td);
-      body.append(tr);
-      return;
-    }
-    [...store.records].reverse().forEach(record => {
-      const tr = document.createElement('tr');
-      const values = [record.number, `${record.hintRound}번째 슛`, record.keeperOrder || '(이전 버전)', record.goals, record.saves, formatTime(record.seconds), record.cause, record.won ? '승리' : '패배'];
-      values.forEach((value, index) => {
-        const td = document.createElement('td');
-        td.textContent = String(value);
-        if (index === 7) td.className = record.won ? 'result-win' : 'result-loss';
-        tr.append(td);
-      });
-      body.append(tr);
-    });
-  }
-
-  // Current-match analysis uses only the five actual shot events.
-  // Older archived v2/v3 summaries are intentionally left untouched.
-  function renderMatchReport() {
-    const report = el('match-report');
-    const finished = game.phase === 'finished';
-    report.hidden = !finished;
-    if (!finished) return;
-    const shots = game.shots;
-    const perfect = shots.filter(s => s.timing === 'PERFECT').length;
-    const good = shots.filter(s => s.timing === 'GOOD').length;
-    const miss = shots.filter(s => s.timing === 'MISS').length;
-    const saves = shots.filter(s => !s.goal && !s.missed).length;
-    el('report-outcome').textContent = game.goals >= WIN_GOALS ? 'VICTORY' : 'DEFEAT';
-    el('report-outcome').className = game.goals >= WIN_GOALS ? 'report-outcome won' : 'report-outcome lost';
-    el('report-score').textContent = `${game.goals} / ${MAX_KICKS}`;
-    el('report-subtitle').textContent = `5번의 슈팅 · ${game.goals}골 · 선방 ${saves}회 · 실축 ${miss}회 · ${formatTime(game.elapsedMs / 1000)}`;
-    el('report-rate').textContent = `${Math.round(game.goals / MAX_KICKS * 100)}%`;
-    el('report-perfect').textContent = String(perfect);
-    el('report-saves').textContent = String(saves);
-    el('report-timing').textContent = `PERFECT ${perfect} · GOOD ${good} · MISS ${miss}`;
-    const list = el('report-rounds');
-    list.replaceChildren();
-    shots.forEach(s => {
-      const item = document.createElement('li');
-      item.className = 'report-round';
-      const number = document.createElement('span'); number.className = 'report-round-number'; number.textContent = `${s.number}R`;
-      const detail = document.createElement('span'); detail.className = 'report-round-detail';
-      const keeper = document.createElement('strong'); keeper.textContent = KEEPER_BY_ID[s.keeperId].name;
-      const sub = document.createElement('small'); sub.textContent = `${DIRECTIONS[s.aim]} 슛 · ${s.timing} · 골키퍼 ${DIRECTIONS[s.keeper]}`;
-      detail.append(keeper, sub);
-      const outcome = document.createElement('strong');
-      outcome.className = `report-round-result ${s.goal ? 'goal' : s.missed ? 'out' : 'save'}`;
-      outcome.textContent = s.goal ? 'GOAL' : s.missed ? 'OUT' : 'SAVE';
-      item.append(number, detail, outcome);
-      list.append(item);
-    });
-    let analysis;
-    if (miss > 0 && saves > 0) analysis = `타이밍 실축 ${miss}회와 골키퍼 선방 ${saves}회가 있었어요. 타이밍 조절과 상대 방향 예측을 각각 연습해 보세요.`;
-    else if (miss > 0) analysis = `타이밍을 놓친 슈팅이 ${miss}회 있었어요. 중앙 구역을 노려 보세요.`;
-    else if (saves > 0) analysis = `실축은 없었지만 골키퍼에게 ${saves}회 막혔어요. 상대의 이전 움직임과 단서를 비교해 보세요.`;
-    else analysis = '다섯 번 모두 득점했어요. 이번 경기에서는 실축이나 선방이 없었어요.';
-    el('report-analysis').textContent = analysis;
-  }
-
-  function render() {
-    const inMatch = game.phase === 'aim' || game.phase === 'timing' || game.phase === 'result';
-    const canAim = game.phase === 'aim' && !game.paused;
-    const phaseText = game.paused ? '일시정지' : ({ ready: '대기 중', aim: '조준 중', timing: '타이밍 조절', result: '킥 결과', finished: game.goals >= WIN_GOALS ? '승리' : '패배' })[game.phase];
-    el('status-badge').textContent = phaseText;
-    el('round-number').innerHTML = `${game.phase === 'ready' ? 0 : game.round} <span class="stat-suffix">/ 5</span>`;
-    el('goal-count').textContent = String(game.goals);
-    el('save-count').textContent = String(game.shots.length - game.goals);
-    el('field-round-label').textContent = game.phase === 'ready' ? '킥오프 준비' : game.phase === 'finished' ? '경기 종료' : `KICK ${game.round} / ${MAX_KICKS}`;
-    el('current-aim').textContent = DIRECTIONS[game.aim];
-    el('aim-move-count').textContent = String(game.aimMoves);
-    el('clue-text').textContent = clueText();
-    el('clue-progress').textContent = `${clueProgress()} / 3`;
-    const last = game.shots.at(-1);
-    el('last-dive').textContent = last ? `${KEEPER_BY_ID[last.keeperId].name} · ${DIRECTIONS[last.keeper]}` : '아직 없음';
-    el('reduce-motion').checked = store.settings.reduceMotion;
-    el('hint-round').value = String(store.settings.hintRound);
-    el('hint-round').disabled = inMatch;
-    document.documentElement.classList.toggle('reduce-motion', store.settings.reduceMotion);
-    document.querySelectorAll('[data-aim]').forEach(button => {
-      button.disabled = !canAim;
-      button.setAttribute('aria-pressed', String(game.aim === Number(button.dataset.aim)));
-    });
-
-    const timingPanel = el('timing-panel');
-    timingPanel.hidden = game.phase !== 'timing' && game.phase !== 'result' && game.phase !== 'finished';
-    el('timing-needle').style.left = `${game.timingPosition * 100}%`;
-    el('timing-readout').textContent = game.phase === 'timing' ? (game.paused ? 'PAUSED' : '움직이는 바늘을 중앙에 멈추세요') : (last?.timing || '—');
-    const primary = el('primary-action');
-    const pause = el('pause-action');
-    const hint = el('action-hint');
-    pause.disabled = !inMatch;
-    pause.textContent = game.paused ? '▶ 재개' : 'Ⅱ 일시정지';
-    if (game.phase === 'ready') {
-      primary.textContent = '▶  게임 시작'; primary.disabled = false;
-      hint.textContent = '시작 → 관찰 → 슈팅 → 결과 → 재시작';
-      el('commentary').textContent = '매 슈팅마다 세 명 중 무작위로 골키퍼가 등장합니다. 행동을 기록해 패턴을 추리하세요.';
-    } else if (game.phase === 'aim') {
-      primary.textContent = '▶  타이밍 시작 · SPACE'; primary.disabled = game.paused;
-      hint.textContent = '← / → 조준 · 1/2/3 방향 선택';
-      el('commentary').textContent = `${game.round}차 상대는 ${currentKeeper().name}! 움직임을 예상하고 슛을 선택하세요.`;
-    } else if (game.phase === 'timing') {
-      primary.textContent = '⚽  지금 슈팅! · SPACE'; primary.disabled = game.paused;
-      hint.textContent = '중앙 녹색 구역에서 정확하게 멈추기 · P 일시정지';
-      el('commentary').textContent = '타이밍을 맞혀도 골키퍼가 같은 방향을 막으면 선방됩니다.';
-    } else if (game.phase === 'result') {
-      primary.textContent = '→  다음 킥 · ENTER'; primary.disabled = game.paused;
-      hint.textContent = '다이빙 모션과 결과를 보고 다음 킥으로';
-      el('commentary').textContent = last.missed ? 'WIDE! 타이밍을 놓쳐 골대 밖으로 나갔어요.' : last.goal
-        ? `GOAL! ${KEEPER_BY_ID[last.keeperId].name}은 ${DIRECTIONS[last.keeper]}으로 다이빙했어요.`
-        : `SAVE! ${KEEPER_BY_ID[last.keeperId].name}이 ${DIRECTIONS[last.keeper]}으로 몸을 던져 막았습니다.`;
-    } else {
-      primary.textContent = '↻  다시 시작'; primary.disabled = false;
-      hint.textContent = '재시작 시 골키퍼 출전 순서를 새로 뽑습니다.';
-      el('commentary').textContent = `5번의 슈팅 완료 · ${game.goals}골 ${MAX_KICKS - game.goals}선방 · ${game.goals >= WIN_GOALS ? '승리' : '패배'}.`;
-    }
-    renderField();
-    renderOpponent();
-    renderHistory();
-    renderRecords();
-    renderMatchReport();
-    updateClock();
-  }
-  function primaryAction() {
-    if (game.paused) return;
-    if (game.phase === 'ready' || game.phase === 'finished') beginGame();
-    else if (game.phase === 'aim') startTiming();
-    else if (game.phase === 'timing') shoot();
-    else if (game.phase === 'result') nextKick();
-  }
-
-  // Handlers are only registered once, even after hundreds of restarts.
-  el('primary-action').addEventListener('click', primaryAction);
-  el('report-restart').addEventListener('click', beginGame);
-  el('pause-action').addEventListener('click', () => togglePause());
-  document.querySelectorAll('[data-aim]').forEach(button => {
-    button.addEventListener('click', () => changeAim(Number(button.dataset.aim)));
-  });
-  document.addEventListener('keydown', event => {
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
-    const target = event.target;
-    if (target instanceof HTMLElement && (target.matches('select, input, textarea') || target.isContentEditable)) return;
-    if (event.code === 'ArrowLeft' || event.code === 'ArrowRight') {
-      if (game.phase === 'aim' && !game.paused) {
-        event.preventDefault(); nudgeAim(event.code === 'ArrowLeft' ? -1 : 1);
-      }
-      return;
-    }
-    if (event.code === 'Digit1' || event.code === 'Digit2' || event.code === 'Digit3') {
-      if (game.phase === 'aim' && !game.paused) {
-        event.preventDefault(); changeAim(Number(event.code.slice(-1)) - 1);
-      }
-      return;
-    }
-    if (event.code === 'KeyP' && !event.repeat) {
-      if (game.phase === 'aim' || game.phase === 'timing' || game.phase === 'result') { event.preventDefault(); togglePause(); }
-      return;
-    }
-    if (event.code === 'Space' && !event.repeat) {
-      if ((game.phase === 'aim' || game.phase === 'timing') && !game.paused) { event.preventDefault(); primaryAction(); }
-      return;
-    }
-    if (event.code === 'Enter' && game.phase === 'result' && !game.paused) {
-      event.preventDefault(); nextKick();
-    }
-  });
-  window.addEventListener('blur', () => togglePause(true));
-  document.addEventListener('visibilitychange', () => { if (document.hidden) togglePause(true); });
-
-  el('reduce-motion').addEventListener('change', (event) => {
-    store.settings.reduceMotion = event.target.checked;
-    if (store.settings.reduceMotion) el('goal-effect').classList.remove('active');
-    persist(); render();
-  });
-  el('hint-round').addEventListener('change', (event) => {
-    if (game.phase === 'aim' || game.phase === 'timing' || game.phase === 'result') return;
-    store.settings.hintRound = Number(event.target.value);
-    persist(); render();
-  });
-  el('clear-records').addEventListener('click', () => {
-    if (!window.confirm('저장된 플레이 기록과 설정을 초기화할까요? 현재 진행 중인 판도 처음 상태로 돌아갑니다.')) return;
-    store = defaultStore(); game = initialGame(); activeHintRound = store.settings.hintRound;
-    try { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(LEGACY_KEY); } catch (_error) { /* optional storage */ }
-    el('goal-effect').classList.remove('active');
-    el('storage-status').textContent = '저장 기록과 설정을 초기화했습니다. 기본값으로 시작합니다.';
-    render();
-  });
-  el('export-records').addEventListener('click', () => {
-    if (!store.records.length) {
-      el('storage-status').textContent = '내보낼 경기 기록이 없습니다. 먼저 한 판을 완료하세요.';
-      return;
-    }
-    const headers = ['경기번호','기록시각(UTC)','단서공개라운드','골키퍼순서','득점','미득점(선방+실축)','시간(초)','실패원인','결과'];
-    const rows = store.records.map(r => [r.number, r.date, r.hintRound, r.keeperOrder || '(이전 버전)', r.goals, r.saves, r.seconds, r.cause, r.won ? '승리' : '패배']);
-    const csv = '\uFEFF' + [headers, ...rows].map(row => row.map(v => `"${String(v).replaceAll('"', '""')}"`).join(',')).join('\r\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url; link.download = 'mind-penalty-play-records.csv';
-    document.body.append(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    el('storage-status').textContent = '경기별 골키퍼 순서를 포함한 CSV를 생성했습니다.';
-  });
-
-  el('storage-status').textContent = loaded.message;
-  if (loaded.message.includes('이전 버전')) persist();
-  setInterval(tick, 250);
-  render();
-  // Keep the timing animation in sync with the actual pause-resume state.
+    if(t>=1840&&arena.dataset.keeperReaction==='none')arena.dataset.keeperReaction=resultKind(shot);if(t>=2850){if(game.round===MAX_KICKS)finishMatch();else{game.phase='result';save();render();}}}
+  function nextKick(){if(game.phase!=='result'||game.paused)return;if(game.round===MAX_KICKS){finishMatch();return;}game.round++;game.phase='aim';game.timingElapsed=0;game.timingPosition=0;game.aim=1;game.lastShot=null;game.visualElapsed=0;stageReset();save();render();fx('click');}
+  function finishMatch(){if(game.phase==='finished')return;game.phase='finished';const record={number:store.stats.gamesPlayed+1,date:new Date().toISOString(),hintRound:game.hintRound,goals:game.goals,saves:5-game.goals,seconds:Math.floor(game.elapsedMs/1000),won:game.goals>=3,keeperOrder:game.keeperOrder.map(id=>keeperById[id].name).join('·'),shots:game.shots.map(s=>({...s})),cause:game.shots.filter(s=>!s.goal).map(s=>`${s.number}R ${s.missed?'타이밍 실축':'골키퍼 선방'}`).join(' / ')||'실패 없음'};store.stats.gamesPlayed++;if(record.won)store.stats.wins++;store.stats.bestScore=Math.max(store.stats.bestScore,game.goals);store.records.push(record);if(store.records.length>MAX_RECORDS)store.records.shift();save();showScreen('report');renderReport(record);}
+  function renderHome(){const match=store.activeMatch&&safeMatch(store.activeMatch);$('start-label').textContent=match?'CONTINUE MATCH':'START MATCH';$('new-match').hidden=!match;$('saved-match-banner').hidden=!match;if(match)$('saved-details').textContent=`ROUND ${store.activeMatch.round}/5 · ${store.activeMatch.goals} GOALS`;}
+  function renderPips(){let html='';for(let i=0;i<5;i++){const s=game.shots[i];html+=`<span class="pip ${s?(s.goal?'goal':'fail'):(i===game.shots.length?'next':'')}" title="${i+1}회차: ${s?(s.goal?'득점 성공':'득점 실패'):(i===game.shots.length?'현재 슈팅':'대기')}" aria-label="${i+1}회차: ${s?(s.goal?'득점 성공':'득점 실패'):(i===game.shots.length?'현재 슈팅':'대기')}">${s?(s.goal?'⚽':'×'):(i+1)}</span>`;}$('pips').innerHTML=html;}
+  function currentClues(){let level=1;if(game.round>=game.hintRound)level=2;if(game.round>=Math.min(5,game.hintRound+1))level=3;return level;}
+  function renderNotebook(){const k=keeper();$('keeper-name').textContent=k.name;$('keeper-quote').textContent=`“${k.quote}”`;$('keeper-avatar').style.setProperty('--keeper-color',k.color);$('keeper-avatar').firstElementChild.textContent=k.number;$('stage-keeper').textContent=k.name;$('clue-step').textContent=`CLUE ${currentClues()} / 3`;$('difficulty-tag').textContent=game.hintRound===2?'EASY':game.hintRound===3?'NORMAL':'HARD';for(let i=1;i<=3;i++){const c=$('clue-'+i);const unlocked=i<=currentClues();c.classList.toggle('locked',!unlocked);c.textContent=unlocked?`${i.toString().padStart(2,'0')} · ${k.clues[i-1]}`:'🔒 아직 잠겨 있습니다.';}const list=$('shot-history');list.replaceChildren();if(!game.shots.length){list.innerHTML='<div class="empty-history">첫 슈팅을 기다리는 중...</div>';}else for(const s of [...game.shots].reverse()){const line=document.createElement('div');line.className='shot-line';line.innerHTML=`<b>${s.number}R</b><span>${esc(keeperById[s.keeperId].name)} · ${DIR[s.aim]} → ${DIR[s.keeper]}</span><strong class="outcome ${s.goal?'good':'bad'}">${s.goal?'GOAL':s.missed?'OUT':'SAVE'}</strong>`;list.append(line);}$('tactic-last').textContent=game.shots.length?`LAST DIVE · ${DIR[game.shots.at(-1).keeper]}`:'LAST DIVE · —';}
+  function render(){if(screen!=='play')return;const state=game.phase;$('header-round').textContent=`ROUND ${game.round} / 5`;$('stadium-status').textContent=game.phase==='aim'?`KICK ${game.round} / 5`:game.phase==='timing'?'TIMING LIVE':game.phase==='animating'?'SHOT IN FLIGHT':'RESULT';$('header-goals').textContent=`${game.goals} GOALS`;$('match-clock').textContent=shortTime(game.elapsedMs);$('selected-label').textContent=`선택: ${DIR[game.aim]}`;$('timing-needle').style.left=`${game.timingPosition*100}%`;$('timing-wrap').classList.toggle('inactive',state==='aim');$('arena').classList.toggle('is-paused',game.paused);$('match-mute').textContent=store.settings.sound?'♪':'♪̸';$('match-mute').title=store.settings.sound?'소리 끄기':'소리 켜기';$('pause-btn').disabled=game.paused;$('pause-btn').setAttribute('aria-label','일시정지');document.documentElement.classList.toggle('reduce-motion',store.settings.reduceMotion);document.querySelectorAll('[data-aim]').forEach(b=>{b.disabled=state!=='aim'||game.paused;b.setAttribute('aria-pressed',String(Number(b.dataset.aim)===game.aim));});const main=$('shoot-btn');main.disabled=game.paused||state==='animating';const phase={aim:'READ / AIM',timing:'KICK / TIMING',animating:'IN FLIGHT',result:'RESULT / REVIEW'};$('phase-label').textContent=phase[state]||'READY';if(state==='aim'){main.textContent='▶ START TIMING · SPACE';$('timing-label').textContent='SPACE를 눌러 시작';$('commentary').textContent=`상대는 ${keeper().name}. 전술 수첩을 확인하고 방향을 선택하세요.`;stageReset();}else if(state==='timing'){main.textContent='⚽ SHOOT! · SPACE';$('timing-label').textContent='중앙의 PERFECT를 노리세요';$('commentary').textContent='SPACE를 다시 누르면 타이밍이 확정됩니다.';}else if(state==='animating'){main.textContent='⚽ SHOT IN FLIGHT';$('timing-label').textContent=game.lastShot.timing;$('commentary').textContent='골키퍼의 다이빙과 관중 반응을 확인하세요.';}else if(state==='result'){main.textContent='→ NEXT KICK · ENTER';$('timing-label').textContent=game.lastShot?.timing||'—';$('commentary').textContent=game.lastShot.goal?'GOAL! 다음 킥을 준비하세요.':game.lastShot.missed?'OUT! 타이밍을 놓쳤습니다.':'SAVE! 골키퍼가 방향을 읽었습니다.';if($('arena').dataset.keeperReaction!==resultKind(game.lastShot)||$('arena').dataset.flight==='none')stageShowResult(game.lastShot);}renderPips();renderNotebook();syncAmbience();}
+  function primaryAction(){if(game.paused)return;if(game.phase==='aim')startTiming();else if(game.phase==='timing')shoot();else if(game.phase==='result')nextKick();}
+  function renderReport(record){$('report-title').textContent=record.won?'VICTORY!':'DEFEAT';$('report-title').style.color=record.won?'var(--lime)':'var(--rose)';$('report-summary').textContent=`${record.goals} / 5 GOALS`;$('report-pips').innerHTML=record.shots.map(s=>`<div class="${s.goal?'hit':'miss'}">${s.number}R<br>${s.goal?'GOAL':s.missed?'OUT':'SAVE'}</div>`).join('');$('report-accuracy').textContent=`${Math.round(record.goals/5*100)}%`;$('report-perfect').textContent=String(record.shots.filter(s=>s.timing==='PERFECT').length);$('report-saves').textContent=String(record.shots.filter(s=>!s.goal&&!s.missed).length);$('report-rounds').innerHTML=record.shots.map(s=>`<div class="report-round-row"><strong>${s.number}R · ${esc(keeperById[s.keeperId].name)}</strong><span>내 선택 ${DIR[s.aim]} · 골키퍼 ${DIR[s.keeper]} · ${s.timing}</span><strong style="color:${s.goal?'var(--lime)':'var(--gold)'}">${s.goal?'GOAL':s.missed?'OUT':'SAVE'}</strong></div>`).join('');$('report-answers').innerHTML=keepers.map(k=>`<div class="answer-card"><strong>${esc(k.name)}</strong><p>${esc(k.rule)}</p></div>`).join('');const failed=record.shots.filter(s=>!s.goal);$('report-insight').textContent=failed.length?`총 ${failed.length}회 미득점: 타이밍 실축 ${failed.filter(s=>s.missed).length}회, 골키퍼 선방 ${failed.filter(s=>!s.missed).length}회. 다음 경기에서는 앞선 슈팅 방향과 골키퍼의 실제 다이빙 기록을 비교해 보세요.`:'모든 슈팅 성공! 골키퍼의 예측을 피해 좋은 타이밍을 만들어냈어요.';}
+  function modalTitle(type){return {help:'HOW TO PLAY',keepers:'KEEPERS · SCOUTING',records:'MATCH RECORDS',settings:'SETTINGS',confirm:'NEW MATCH'}[type]||'MENU'}
+  function openModal(type){modal=type;$('modal-title').textContent=modalTitle(type);const body=$('modal-body');if(type==='help')body.innerHTML=`<div class="modal-card"><strong>5번의 슛 중 3골 이상이면 승리!</strong><p>첫 세 라운드에는 세 골키퍼가 한 번씩 무작위로 등장하며, 같은 골키퍼는 연속 등장하지 않습니다.</p></div><h3>게임 조작</h3><ul><li><b>1 / 2 / 3 또는 ← →</b>: 슈팅 방향 선택</li><li><b>SPACE</b>: 타이밍 시작 → 다시 눌러 슈팅</li><li><b>ENTER</b>: 다음 라운드</li><li><b>P</b>: 일시정지 / 재개</li></ul><h3>타이밍과 심리전</h3><p>중앙의 녹색 PERFECT·GOOD 구역에 바늘을 멈추세요. 타이밍이 MISS면 골대 밖, GOOD·PERFECT여도 골키퍼와 슈팅 방향이 같으면 SAVE입니다.</p><p>전술 수첩은 오른쪽에 계속 표시됩니다. 단서는 경기 진행에 따라 단계적으로 열리며, 실제 AI 규칙은 경기가 끝난 후 공개됩니다.</p>`;
+    else if(type==='keepers')body.innerHTML=keepers.map(k=>`<div class="modal-card"><strong style="color:${k.color}">${esc(k.name)}</strong><p>“${esc(k.quote)}”</p><small>정확한 행동 규칙은 MATCH REPORT에서 확인하세요.</small></div>`).join('');
+    else if(type==='records'){const records=[...store.records].reverse().slice(0,20);body.innerHTML=`<div class="modal-card">누적 경기 <b>${store.stats.gamesPlayed}</b> · 승리 <b>${store.stats.wins}</b> · 최고 <b>${store.stats.bestScore}/5</b></div><div>${records.length?records.map(r=>`<div class="record-card"><span>#${esc(r.number||'?')} · ${esc(String(r.date||'').slice(0,10))}<br><small>${esc(r.keeperOrder||'')}</small></span><b>${esc(r.goals??'?')}/5 ${r.won?'WIN':'LOSE'}</b></div>`).join(''):'아직 완료한 경기가 없습니다.'}</div><p><button class="button button-outline" id="records-export">EXPORT CSV</button></p>`;}
+    else if(type==='settings'){const s=store.settings;body.innerHTML=`<div class="settings-row"><span><strong>전체 음소거</strong><small>경기장·효과음 모두 끄기</small></span><input id="s-sound" type="checkbox" ${!s.sound?'checked':''}></div><div class="settings-row"><span><strong>전체 음량</strong><small id="master-label">${s.master}%</small></span><input id="s-master" type="range" min="0" max="100" value="${s.master}"></div><div class="settings-row"><span><strong>관중 소리</strong><small id="crowd-label">${s.crowd}%</small></span><input id="s-crowd" type="range" min="0" max="100" value="${s.crowd}"></div><div class="settings-row"><span><strong>게임 효과음</strong><small id="effects-label">${s.effects}%</small></span><input id="s-effects" type="range" min="0" max="100" value="${s.effects}"></div><div class="settings-row"><span><strong>움직임 줄이기</strong><small>카메라·캐릭터 모션 축소</small></span><input id="s-motion" type="checkbox" ${s.reduceMotion?'checked':''}></div><div class="settings-row"><span><strong>단서 공개 난이도</strong><small>경기 중에는 정답을 바로 보여주지 않습니다.</small></span><select id="s-hint" ${game.phase!=='ready'&&screen==='play'?'disabled':''}><option value="2" ${s.hintRound===2?'selected':''}>EASY · 2R부터</option><option value="3" ${s.hintRound===3?'selected':''}>NORMAL · 3R부터</option><option value="4" ${s.hintRound===4?'selected':''}>HARD · 4R부터</option></select></div><p>게임 소리는 가볍고 귀여운 아케이드 스타일입니다. 킥 전에는 작은 웅성거림, 득점 때는 밝은 환호 멜로디, 실패 때는 짧은 탄식 효과가 재생됩니다. 모든 소리는 ZIP에 포함되어 오프라인에서도 작동합니다.</p><p id="sound-status" style="font-size:11px;color:#a2bdba">사운드 상태: 로컬 아케이드 효과음</p><button id="sound-test" class="button button-outline">♪ 사운드 테스트</button><p id="storage-note" hidden>설정이 브라우저에 저장되었습니다.</p>`;}
+    else if(type==='confirm')body.innerHTML=`<div class="modal-card"><h3>새 경기를 시작할까요?</h3><p>현재 진행 중인 경기는 종료되며 1라운드부터 다시 시작합니다. 완료한 경기 기록은 유지됩니다.</p></div><div style="display:flex;gap:10px"><button id="confirm-cancel" class="button button-outline">취소</button><button id="confirm-new" class="button button-primary">새 경기 시작</button></div>`;
+    $('modal-backdrop').hidden=false;const close=$('modal-close');close.focus();if(type==='settings')bindSettings();if(type==='records')$('records-export').onclick=exportCSV;if(type==='confirm'){$('confirm-cancel').onclick=closeModal;$('confirm-new').onclick=beginGame;}if(screen==='play')stopAudio();}
+  function closeModal(){modal=null;$('modal-backdrop').hidden=true;syncAmbience();}
+  function bindSettings(){const s=store.settings;$('s-sound').onchange=e=>{s.sound=!e.target.checked;save();if(!s.sound)stopAudio();else{ensureAudio();syncAmbience();}renderIfPlaying();};for(const key of ['master','crowd','effects'])$('s-'+key).oninput=e=>{s[key]=Number(e.target.value);$(key+'-label').textContent=s[key]+'%';save();syncAmbience();};$('s-motion').onchange=e=>{s.reduceMotion=e.target.checked;document.documentElement.classList.toggle('reduce-motion',s.reduceMotion);save();};$('s-hint').onchange=e=>{s.hintRound=Number(e.target.value);save();};$('sound-test').onclick=()=>{ensureAudio();if(!s.sound){s.sound=true;$('s-sound').checked=false;save();}fx('goal');sampleReaction('goal');};}
+  const renderIfPlaying=()=>{if(screen==='play')render()};
+  function exportCSV(){const headers=['game','date','won','goals','seconds','hint_round','round','keeper','aim','keeper_dive','timing','goal','missed'];const lines=[headers];for(const rec of store.records){if(!Array.isArray(rec.shots)||!rec.shots.length){lines.push([rec.number,rec.date,rec.won,rec.goals,rec.seconds,rec.hintRound,'','','','','','','']);continue;}for(const s of rec.shots)lines.push([rec.number,rec.date,rec.won,rec.goals,rec.seconds,rec.hintRound,s.number,keeperById[s.keeperId]?.name||'',DIR[s.aim],DIR[s.keeper],s.timing,s.goal,s.missed]);}const csv='\ufeff'+lines.map(row=>row.map(v=>`"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='mind-penalty-match-records.csv';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);}
+  function createCrowd(){const NS='http://www.w3.org/2000/svg';function make(tag,attributes={},text){const n=document.createElementNS(NS,tag);for(const [k,v] of Object.entries(attributes))n.setAttribute(k,String(v));if(text)n.textContent=text;return n;}const shirts=['#97b9ac','#bed887','#7396b3','#d1a989','#acc5bd','#8dabb7'];const near=$('crowdNear'),far=$('crowdFar');for(let i=0;i<100;i++){const x=(i*71)%1000+5,y=88+Math.floor(i/25)*19+(i%3)*2;const g=make('g',{class:'spectator',style:`--delay:${(i%7)*.055}s`});g.append(make('circle',{cx:x,cy:y,r:3.4,fill:i%5===0?'#b5c5aa':'#7394a3'}),make('path',{d:`M${x-5} ${y+8}q5 -8 10 0v7h-10z`,fill:'#4a6975'}));far.append(g);}for(let i=0;i<28;i++){const x=20+i*35.7,y=139+(i%2)*6;const g=make('g',{class:'spectator',style:`--delay:${(i%8)*.07}s;transform-origin:${x}px ${y+27}px`});g.append(make('path',{d:`M${x-9} ${y+15}Q${x} ${y+5} ${x+9} ${y+15}L${x+11} ${y+33}H${x-11}Z`,fill:shirts[i%shirts.length]}),make('circle',{cx:x,cy:y+4,r:8,fill:i%4===0?'#c58b6d':'#e0b392'}));g.append(make('path',{class:'fan-arm left',d:`M${x-9} ${y+15}L${x-17} ${y+34}`,stroke:'#e4b28e','stroke-width':5,'stroke-linecap':'round',style:`transform-origin:${x-9}px ${y+15}px`}));g.append(make('path',{class:'fan-arm right',d:`M${x+9} ${y+15}L${x+17} ${y+34}`,stroke:'#d4a37e','stroke-width':5,'stroke-linecap':'round',style:`transform-origin:${x+9}px ${y+15}px`}));near.append(g);}}
+  function initEvents(){document.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openModal(b.dataset.open));$('start-match').onclick=()=>store.activeMatch?resumeExisting():beginGame();$('new-match').onclick=()=>openModal('confirm');$('pause-btn').onclick=pause;$('resume-btn').onclick=resume;$('pause-settings').onclick=()=>openModal('settings');$('return-home').onclick=returnHome;$('shoot-btn').onclick=primaryAction;document.querySelectorAll('[data-aim]').forEach(b=>b.onclick=()=>setAim(Number(b.dataset.aim)));$('match-mute').onclick=()=>{store.settings.sound=!store.settings.sound;save();if(store.settings.sound)ensureAudio();else stopAudio();render();};$('modal-close').onclick=closeModal;$('modal-backdrop').addEventListener('click',e=>{if(e.target===$('modal-backdrop'))closeModal();});$('report-home').onclick=()=>showScreen('home');$('report-back-home').onclick=()=>showScreen('home');$('report-restart').onclick=beginGame;$('report-export').onclick=exportCSV;document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName))return;if(e.key==='Escape'){if(modal)closeModal();else if(screen==='play'){if(game.paused)resume();else pause();}return;}if(modal)return;if(screen!=='play')return;if(e.code==='KeyP'){e.preventDefault();if(game.paused)resume();else pause();return;}if(game.paused)return;if(e.code==='Space'){e.preventDefault();if(game.phase==='aim'||game.phase==='timing')primaryAction();return;}if(e.code==='Enter'&&game.phase==='result'){e.preventDefault();nextKick();return;}if(game.phase==='aim'){if(e.code==='ArrowLeft'){e.preventDefault();setAim((game.aim+2)%3);}else if(e.code==='ArrowRight'){e.preventDefault();setAim((game.aim+1)%3);}else if(['Digit1','Digit2','Digit3','Numpad1','Numpad2','Numpad3'].includes(e.code))setAim(Number(e.code.slice(-1))-1);}});document.addEventListener('visibilitychange',()=>{if(document.hidden&&screen==='play'&&!game.paused)pause();});window.addEventListener('pagehide',()=>{if(screen==='play'&&game.phase!=='finished'){game.paused=true;save();}stopAudio();});}
+  function frame(now){const dt=Math.max(0,Math.min(100,now-lastFrame));lastFrame=now;if(screen==='play'&&!game.paused&&!modal){if(['aim','timing','animating','result'].includes(game.phase)){game.elapsedMs+=dt;$('match-clock').textContent=shortTime(game.elapsedMs);}if(game.phase==='timing'){game.timingElapsed+=dt;game.timingPosition=timingAt(game.timingElapsed);$('timing-needle').style.left=`${game.timingPosition*100}%`;}if(game.phase==='animating'){game.visualElapsed+=dt;animateShot();}}requestAnimationFrame(frame);}
+  createCrowd();initEvents();showScreen('home');document.documentElement.classList.toggle('reduce-motion',store.settings.reduceMotion);requestAnimationFrame(frame);
+  // Test harness is provided only when explicitly requested in the URL; regular players never see it.
+  if(new URLSearchParams(location.search).has('test'))window.__mpTest={get:()=>({screen,game:structuredClone(game),store:structuredClone(store)}),shootAt:position=>{if(game.phase==='aim')startTiming();if(game.phase==='timing'){game.timingElapsed=position*CYCLE_MS/2;shoot();}},finish:()=>{if(game.phase==='animating'){game.visualElapsed=3200;animateShot();}},next:nextKick,home:returnHome,begin:beginGame,pause,resume};
 })();
